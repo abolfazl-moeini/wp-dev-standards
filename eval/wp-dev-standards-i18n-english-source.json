@@ -1,0 +1,24 @@
+{
+  "name": "i18n house rules: English gettext sources and escape",
+  "skills": ["wordpress-router", "wp-dev-standards"],
+  "query": "This plugin is for Iranian sites. Admin notices and settings labels are currently written in Persian inside esc_html_e() and some buttons use bare _e() without escaping. Fix localization to match our house rules.",
+  "expected_behavior": [
+    "Step 1: Route via wordpress-router; apply wp-dev-standards for i18n/string rules",
+    "Step 2: Enforce English-only source strings inside all gettext functions (__(), _e(), esc_html_e(), etc.)",
+    "Step 3: Replace Persian (or other non-English) literals inside gettext with clear English sources",
+    "Step 4: Do not 'fix' locale by hardcoding target language in PHP; use translation catalogs for fa_IR if needed",
+    "Step 5: Prefer esc_html_e / esc_html__ for HTML body text and esc_attr_e / esc_attr__ for attributes; avoid bare _e() for HTML",
+    "Step 6: Ensure text domain is a string literal matching the plugin slug (dashes, lowercase)",
+    "Step 7: Use sprintf/printf placeholders for dynamic values with translators: comments; no variable interpolation inside gettext templates",
+    "Step 8: Keep WP_Error codes as untranslated literals; translate only messages with English sources",
+    "Step 9: Run the localization checklist from wp-dev-standards before finishing"
+  ],
+  "success_criteria": [
+    "No non-English literals remain inside gettext/wp.i18n calls",
+    "User-visible HTML uses escaped i18n helpers where appropriate",
+    "Text domain is literal and matches plugin slug",
+    "Dynamic strings use placeholders, not concatenation or interpolated variables inside gettext",
+    "Error codes are not passed through __()",
+    "Target language (e.g. Persian) would come from .po/language packs, not from PHP source strings"
+  ]
+}
