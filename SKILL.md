@@ -1,6 +1,6 @@
 ---
 name: wp-dev-standards
-description: "House rules for WordPress plugin/theme development on this team. Use for Localization/i18n (always English gettext sources; __(), _e(), esc_html_e(), text domains, Domain Path), string escaping, and team coding conventions. Prefer this skill over domain skills when deciding how to write or review user-visible strings."
+description: "House rules for WordPress plugin/theme development on this team. Use for Localization/i18n (always English gettext sources; __(), _e(), esc_html_e(), text domains, Domain Path), shipping locales via wp i18n (make-pot, update-po, make-mo, make-json), JS wp.i18n / @wordpress/i18n, string escaping, and team coding conventions. Prefer this skill over domain skills when deciding how to write or review user-visible strings."
 compatibility: "Targets WordPress 7.0+ (PHP 7.4.0+). Filesystem-based agent with bash + node."
 ---
 
@@ -15,6 +15,7 @@ Domain skills (`wp-plugin-development`, `wp-patterns`, `wp-rest-api`, …) still
 - Reviewing PRs for **missing translations**, non-English gettext sources, wrong text domain, or unescaped output.
 - Scaffolding plugins/themes (**Text Domain** / **Domain Path**).
 - Interactivity API labels or serializing translations to JS.
+- User asks to **translate**, add a locale, or ship a non-English UI (catalog pipeline, §1.6).
 - User asks for “house rules”, “our WordPress standards”, localization, or i18n.
 
 ## Inputs required
@@ -31,9 +32,9 @@ Full depth: **`references/localization.md`**.
 
 ### 1.0 Source language is always English (CRITICAL)
 
-> **The text inside translation functions (`__()`, `_e()`, `esc_html_e()`, `_n()`, `_x()`, and all siblings in PHP or JS) MUST be written in English.**
+> **The text inside translation functions (PHP `__()`, `_e()`, `esc_html_e()`, `_n()`, `_x()`, and siblings; JS `__()`, `_x()`, `_n()`, `_nx()`) MUST be written in English.**
 
-> **No matter what language the plugin, theme, market, client, or UI targets (Persian, Arabic, German, …): source strings in code are English. The target language is applied later via translation files (`.po` / `.mo` / language packs / translate.wordpress.org) — never by putting non-English literals inside gettext calls.**
+> **No matter what language the plugin, theme, market, client, or UI targets (Persian, Arabic, German, …): source strings in code are English. The target language is applied later via translation catalogs (`.po` → `.mo` for PHP, `.po` → `.json` for JS; language packs / translate.wordpress.org) — never by putting non-English literals inside gettext calls.**
 
 ```php
 // CORRECT — English source; locale comes from translations
@@ -44,7 +45,7 @@ esc_html_e( 'ذخیره تنظیمات', 'my-plugin' );
 esc_html_e( 'Einstellungen speichern', 'my-plugin' );
 ```
 
-**Hard house rule.** Do not “localize” by writing Farsi/Arabic/etc. inside `__()` / `_e()` / `esc_*`. Write decent English; ship a `.po` for the real locale.
+**Hard house rule.** Do not “localize” by writing Farsi/Arabic/etc. inside `__()` / `_e()` / `esc_*`. Write decent English; ship a locale via §1.6.
 
 ### 1.1 Non-negotiable rules
 
@@ -146,8 +147,8 @@ add_action( 'init', function () {
 } );
 ```
 
-- Themes: `Text Domain` in `style.css`; `load_theme_textdomain( 'theme-slug', get_template_directory() . '/languages' )` on `after_setup_theme`.
-- Plugin/theme language-dir MO files: prefer `{text-domain}-{locale}.mo` (e.g. `my-plugin-fa_IR.mo`). Global dirs under `wp-content/languages/{plugins,themes}/` use the same pattern.
+- Themes: `Text Domain` in `style.css`; `load_theme_textdomain( 'theme-slug', get_template_directory() . '/languages' )` on **`init`** (WP 6.7+ JIT; not `plugins_loaded`, and not `after_setup_theme` if gettext runs before `init`).
+- Plugin `languages/`: `{text-domain}-{locale}.mo` (e.g. `my-plugin-fa_IR.mo`). Theme `languages/`: `{locale}.mo` (e.g. `fa_IR.mo`). Global `wp-content/languages/{plugins,themes}/` uses `{text-domain}-{locale}.mo`.
 - wordpress.org language packs take priority since WP 4.6+; still declare domain/path correctly. Off-directory or custom `.mo` still needs `load_*_textdomain` (or a `load_textdomain_mofile` filter).
 
 ### 1.5 Checklist (before merge)
@@ -164,6 +165,29 @@ add_action( 'init', function () {
 - [ ] `WP_Error` codes literal; messages English gettext
 - [ ] Text domain = slug, literal, same in header + PHP + JS
 - [ ] Pattern/block registration titles and descriptions translated
+- [ ] JS uses `__` / `_x` / `_n` / `_nx` / `sprintf` only — **no `_e` in JS**
+- [ ] If a target locale was requested: POT + PO (`msgstr` filled) + MO exist
+- [ ] If JS UI exists and a locale was requested: `wp-i18n` dep + `wp_set_script_translations` + JSON from `make-json`
+
+### 1.6 Catalog pipeline (when a locale is requested)
+
+Full depth: `references/localization.md` §3.3 (JS) and §11 (commands).
+
+Run this when the user asks to translate, add a locale, or ship a non-English UI. Skip on ordinary string edits unless `languages/*.po` already exists and they asked to refresh.
+
+JS and PHP share **one PO**. JSON is **not** generated from JS source. There is **no** `wp i18n make-po`.
+
+1. Resolve domain (= slug) and locale (ask once if missing).
+2. Ensure `languages/` and `Domain Path: /languages`.
+3. `wp i18n make-pot . languages/{domain}.pot --domain={domain}`
+4. New locale: copy POT → `{domain}-{locale}.po`, set `Language:` and `Plural-Forms`. Existing: `wp i18n update-po languages/{domain}.pot languages`
+5. **Agent fills `msgstr`** in the target language. `msgid` stays English. Do not write that language into PHP/JS.
+6. `wp i18n make-mo languages`
+7. If the PO references JS/TS files: `wp i18n make-json languages --no-purge` (add `--use-map` when build path ≠ source path). Then `wp_set_script_translations( $handle, $domain, plugin_dir_path( __FILE__ ) . 'languages' )` after the script is registered.
+
+JS wrap (English sources): `import { __, _x, _n, _nx, sprintf } from '@wordpress/i18n'` or `const { __, _x, _n, _nx, sprintf } = wp.i18n`. Register the script with dependency `wp-i18n`.
+
+Optional: `wp i18n make-php languages` (`.l10n.php`, WP 6.5+). House default remains MO.
 
 ---
 
@@ -190,13 +214,16 @@ add_action( 'init', function () {
 1. Resolve text domain from plugin/theme header (or ask once). Domain must equal slug.
 2. Apply **§1** to every new/changed user-visible string — **English sources only**.
 3. Prefer escaped helpers for HTML; bare `__()` for non-HTML contexts (arrays, errors, registration args).
-4. Run §1.5 checklist.
-5. Route architecture/API work to the matching domain skill; keep i18n decisions here.
+4. If a target locale was requested, run **§1.6** (do not put that locale in gettext).
+5. Run §1.5 checklist.
+6. Route architecture/API work to the matching domain skill; keep i18n decisions here.
 
 ## Verification
 
 - Grep: no non-English literals inside gettext / `wp.i18n` calls.
-- Load a locale (or test `.po`) and confirm UI language changes **without** editing PHP/JS sources.
+- Grep JS: no `_e(` / `_ex(` as i18n helpers.
+- If a locale was requested: `{domain}.pot`, `{domain}-{locale}.po` with filled `msgstr`, and matching `.mo` exist; JSON exists when the PO has JS `#:` refs.
+- Load that locale and confirm UI language changes **without** editing PHP/JS sources.
 - Grep: no raw user-facing strings without gettext; no translated error codes.
 - Patterns: English gettext sources; no bare `_e()` in markup.
 
@@ -204,7 +231,9 @@ add_action( 'init', function () {
 
 | Symptom | Likely cause | Fix |
 |---------|----------------|-----|
-| Always English on fa/de site | Domain/path/load or missing catalog | Align domain + load + ship locale — **do not** put fa/de in `__()` |
+| Always English on fa/de site | Domain/path/load or missing catalog | Align domain + load + run §1.6 — **do not** put fa/de in `__()` |
+| Locale requested but only English gettext | Pipeline not run | §1.6: POT → PO → fill `msgstr` → MO (and JSON if JS) |
+| JS still English | Missing JSON / handle / path / `wp-i18n` dep | `make-json --no-purge` + `wp_set_script_translations` after register |
 | Non-English inside gettext | Violates §1.0 | Rewrite to **English**; add real translation file |
 | Security flags `_e` | Unescaped HTML | `esc_html_e` / `esc_attr_e` |
 | Broken word order after translate | Concatenated fragments | One English sentence + numbered placeholders |
@@ -214,7 +243,8 @@ add_action( 'init', function () {
 ## Escalation
 
 - Upstream: [I18n Common APIs](https://developer.wordpress.org/apis/internationalization/), [Guidelines](https://developer.wordpress.org/apis/internationalization/internationalization-guidelines/), [Plugin i18n](https://developer.wordpress.org/plugins/internationalization/how-to-internationalize-your-plugin/), [Theme i18n](https://developer.wordpress.org/themes/functionality/internationalization/).
-- JS: `@wordpress/i18n` / `wp.i18n` + `wp_set_script_translations`.
+- Catalogs: [wp i18n](https://developer.wordpress.org/cli/commands/i18n/) (`make-pot`, `update-po`, `make-mo`, `make-json`).
+- JS: [`@wordpress/i18n`](https://developer.wordpress.org/block-editor/reference-guides/packages/packages-i18n/), [Block Editor i18n](https://developer.wordpress.org/block-editor/how-to-guides/internationalization/), [`wp_set_script_translations`](https://developer.wordpress.org/reference/functions/wp_set_script_translations/).
 - Ask if the project intentionally uses multiple text domains (rare; must be documented).
 
 ## Sources
@@ -223,6 +253,9 @@ add_action( 'init', function () {
 |-------|--------|
 | **English-only gettext sources** | Team house rule (§1.0) |
 | Domain, Domain Path, load_*, placeholders, plurals, escape helpers | WordPress Plugin / Theme / Common API handbooks |
+| POT / PO / MO / JSON pipeline | [wp i18n](https://developer.wordpress.org/cli/commands/i18n/), Block Editor i18n guide |
+| JS `__` / `_x` / `_n` / `_nx` / `sprintf` (no `_e`) | `@wordpress/i18n`, Common APIs i18n |
+| `wp_set_script_translations` | WP 5.0+ script translations |
 | Pattern i18n + escape | `skills/wp-patterns/` |
 | Error message vs code | `skills/wp-abilities-api/references/error-code-vocabulary.md` |
 | Interactivity labels | `skills/wp-interactivity-api/references/server-side-rendering.md` |

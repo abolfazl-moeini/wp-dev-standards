@@ -8,15 +8,18 @@ Extracted and adapted from:
 - [Internationalization Guidelines](https://developer.wordpress.org/apis/internationalization/internationalization-guidelines/)
 - [How to Internationalize Your Plugin](https://developer.wordpress.org/plugins/internationalization/how-to-internationalize-your-plugin/)
 - [Theme Internationalization](https://developer.wordpress.org/themes/functionality/internationalization/)
+- [wp i18n (WP-CLI)](https://developer.wordpress.org/cli/commands/i18n/)
+- [Block Editor internationalization](https://developer.wordpress.org/block-editor/how-to-guides/internationalization/)
+- [`@wordpress/i18n`](https://developer.wordpress.org/block-editor/reference-guides/packages/packages-i18n/)
 - In-repo: `wp-patterns`, `wp-abilities-api`, `wp-interactivity-api`, `wp-plugin-development`
 
 ---
 
 ## 0. Source language is always English (CRITICAL — house rule)
 
-> **The text passed into translation functions (`__()`, `_e()`, `esc_html_e()`, `_n()`, `_x()`, `esc_attr_e()`, and every sibling in PHP or JS) MUST be English.**
+> **The text passed into translation functions (PHP `__()`, `_e()`, `esc_html_e()`, `_n()`, `_x()`, and siblings; JS `__()`, `_x()`, `_n()`, `_nx()`) MUST be English.**
 
-> **The plugin or theme may target any market or UI language. That does not change the source. Write English inside gettext; apply the target language later with translation files (`.po` / `.mo` / language packs / translate.wordpress.org).**
+> **The plugin or theme may target any market or UI language. That does not change the source. Write English inside gettext; apply the target language later with catalogs (`.po` → `.mo` for PHP, `.po` → `.json` for JS; language packs / translate.wordpress.org).**
 
 | Situation | What goes in `__()` / `esc_html_e()` | What the user sees in fa_IR / de_DE / … |
 |-----------|--------------------------------------|------------------------------------------|
@@ -39,7 +42,7 @@ esc_html_e( 'Einstellungen speichern', 'my-plugin' );
 - Non-English sources break shared catalogs, reuse, and standard contributor workflows.
 - English sources + proper `.po` is the supported path for “plugin UI speaks Persian (or any locale).”
 
-If the user asks for a “Persian plugin,” still write **English** inside translation functions and, if needed, add a `fa_IR` catalog — do **not** put Persian inside `__()`.
+If the user asks for a “Persian plugin,” still write **English** inside translation functions and ship a `fa_IR` catalog via §11 — do **not** put Persian inside `__()`.
 
 ---
 
@@ -128,41 +131,109 @@ function my_plugin_load_textdomain() {
 
 **WordPress 4.6+ / wordpress.org:** language packs from translate.wordpress.org take priority. Directory plugins may omit an explicit load if they rely only on those packs and set `Requires at least:` to 4.6+. Off-directory plugins, custom `.mo` files, or early strings still need `load_plugin_textdomain` or a `load_textdomain_mofile` filter.
 
+**WordPress 6.7+ JIT (this skill targets 7.0+):** `load_plugin_textdomain()` only registers the path; files load just-in-time. Call it on `init` (priority `0` if widgets or other `init` priority-1 code uses gettext). **Do not** hook `plugins_loaded` — that triggers `_load_textdomain_just_in_time was called incorrectly`.
+
 ### 3.2 Theme — `load_theme_textdomain`
 
 ```php
-add_action( 'after_setup_theme', function () {
+add_action( 'init', function () {
     load_theme_textdomain( 'my-theme', get_template_directory() . '/languages' );
 } );
 ```
 
-Child themes: `load_child_theme_textdomain()` when the child owns its own strings.
+Child themes: `load_child_theme_textdomain()` when the child owns its own strings. Same hook rule as plugins: `init` or later (WP 6.7+). `after_setup_theme` is too early if any gettext runs before `init`.
 
 **MO naming**
 
 | Location | Filename pattern |
 |----------|------------------|
 | Plugin `languages/` | `{text-domain}-{locale}.mo` (e.g. `my-plugin-fa_IR.mo`) |
-| Theme `languages/` | Prefer `{text-domain}-{locale}.mo`; some themes still use `{locale}.mo` |
+| Theme `languages/` | `{locale}.mo` (e.g. `fa_IR.mo`) — **not** `{text-domain}-{locale}.mo` |
 | `wp-content/languages/plugins/` | `{text-domain}-{locale}.mo` |
 | `wp-content/languages/themes/` | `{text-domain}-{locale}.mo` |
 
 ### 3.3 JavaScript (WP 5.0+)
 
-1. Register/enqueue the script with dependency `wp-i18n`.
-2. Call `wp_set_script_translations( $handle, $domain, $path_optional )`.
-3. In JS (English sources only):
+JS uses the **same English sources and the same PO** as PHP. Runtime files for JS are Jed JSON produced from that PO (`wp i18n make-json`, §11) — JSON is not generated from JS source.
+
+**1. Register with `wp-i18n`**
+
+```php
+wp_register_script(
+    'my-plugin-script',
+    plugins_url( 'js/admin.js', __FILE__ ),
+    array( 'wp-i18n' ),
+    '1.0.0',
+    true
+);
+```
+
+Bundled/block code may `import { __, _x, _n, _nx, sprintf } from '@wordpress/i18n'` instead of the `wp.i18n` global. The script still needs the `wp-i18n` dependency (usually via `*.asset.php`).
+
+**2. Call `wp_set_script_translations` after the script is registered**
+
+```php
+add_action( 'wp_enqueue_scripts', 'my_plugin_enqueue', 10 );
+add_action( 'wp_enqueue_scripts', 'my_plugin_script_i18n', 20 );
+
+function my_plugin_script_i18n() {
+    wp_set_script_translations(
+        'my-plugin-script',
+        'my-plugin',
+        plugin_dir_path( __FILE__ ) . 'languages'
+    );
+}
+```
+
+- Argument 1: the **registered handle** (auto-registered block scripts are often `{plugin-slug}-editor-script`).
+- Argument 2: text domain (same literal as PHP).
+- Argument 3: **filesystem** directory (`plugin_dir_path()`, trailing slash included). Required off wordpress.org. Do not pass `plugin_basename()`.
+- wordpress.org language packs can supply JSON automatically; a third-arg custom path is for shipping your own files. Packs in `WP_LANG_DIR` still take priority when present.
+
+**3. Wrap JS strings (English only)**
+
+Official JS API — these mirror PHP. **There is no `_e`, `_ex`, or `esc_*` in `@wordpress/i18n` / `wp.i18n`.** Return the string; the view layer prints it.
+
+| Need | JS |
+|------|-----|
+| Translate | `__( 'Save settings', 'my-plugin' )` |
+| Context | `_x( 'Post', 'noun', 'my-plugin' )` |
+| Plural | `_n( '%s item', '%s items', count, 'my-plugin' )` |
+| Plural + context | `_nx( … )` |
+| Placeholders | `sprintf( __( 'Hello %s', 'my-plugin' ), name )` |
 
 ```javascript
-const { __, _x, _n, sprintf } = wp.i18n;
+import { __, _x, _n, _nx, sprintf } from '@wordpress/i18n';
 
 __( 'Hello World', 'my-plugin' );
 _x( 'My block name', 'block title', 'my-plugin' );
+sprintf( _n( '%s comment', '%s comments', n, 'my-plugin' ), n );
 ```
 
-Path argument to `wp_set_script_translations` is required when not hosted on wordpress.org.
+Classic (non-module) scripts:
 
-Prefer `wp-i18n` over legacy `wp_localize_script()` bags for new UI strings. `wp_localize_script` remains fine for non-translation data (REST URL, nonce).
+```javascript
+const { __, _x, _n, _nx, sprintf } = wp.i18n;
+```
+
+**4. JSON file names**
+
+WordPress loads, in the directory from argument 3 (or the language pack dir):
+
+- `{domain}-{locale}-{md5}.json` — `md5` of the **relative JS source path** (what `make-json` writes)
+- or `{domain}-{locale}-{handle}.json` — if you rename to the script handle
+
+One JSON file per JS source that had strings in the PO.
+
+**5. Built bundles**
+
+`make-pot` records source paths (`src/index.js`). The browser loads `build/index.js`. If those differ, pass a map:
+
+```bash
+wp i18n make-json languages --no-purge --use-map='{"src/index.js":"build/index.js"}'
+```
+
+**Do not** put UI strings in `wp_localize_script()`. That helper is only for non-translation data (REST URL, nonce, bootstrap config).
 
 ---
 
@@ -346,8 +417,9 @@ Hardcoding non-English UI **without** gettext is also wrong for shippable plugin
 - [ ] Placeholders + `/* translators: … */` comments
 - [ ] No sentence concatenation; no variables inside gettext templates
 - [ ] No unnecessary HTML/URLs/empty strings in gettext
-- [ ] JS: `wp-i18n` + `wp_set_script_translations` + English sources
+- [ ] JS: `wp-i18n` + `wp_set_script_translations` + English sources; no `_e` in JS
 - [ ] Error codes not passed through `__()`
+- [ ] If a locale was requested: POT + PO (`msgstr` filled) + MO; JSON if JS strings exist (§11)
 
 ---
 
@@ -355,22 +427,103 @@ Hardcoding non-English UI **without** gettext is also wrong for shippable plugin
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| Site stays English | Domain / path / load mismatch or missing catalog | Align slug, header, `load_*`, MO names; ship locale |
-| “Persian plugin” still shows English | Missing `fa_IR` catalog | Add translations; do **not** replace sources with Persian |
+| Site stays English | Domain / path / load mismatch or missing catalog | Align slug, header, `load_*`, MO names; run §11 |
+| “Persian plugin” still shows English | Missing `fa_IR` catalog | Run §11; do **not** replace sources with Persian |
+| JS still English | No JSON, wrong handle/path, missing `wp-i18n` dep | `make-json --no-purge` + `wp_set_script_translations` after register |
+| `make-json` empty / wrong file | Source path ≠ runtime path | `--use-map`; check `#:` refs in the PO |
+| Theme MO not loaded | Named `{domain}-{locale}.mo` in the theme dir | Rename to `{locale}.mo` |
+| JIT notice / too early | `load_*_textdomain` on `plugins_loaded` | Hook `init` or later |
 | Strings never appear in `.pot` | Variable domain or dynamic string build | Literal domain + static English templates |
 | Broken word order in locale | Concatenated fragments | One sentence + numbered placeholders |
 | Security flag on `_e` | Unescaped HTML output | `esc_html_e` / `esc_attr_e` |
 
 ---
 
-## 11. Catalog generation (optional)
+## 11. Catalog pipeline (ship a locale)
 
-```bash
-# From plugin root (WP-CLI)
-wp i18n make-pot . languages/my-plugin.pot --domain=my-plugin
+Wrapping strings is i18n. Shipping a locale is this pipeline. There is **no** `wp i18n make-po`.
+
+**When to run:** the user asks to translate, add a locale (`fa_IR`, `de_DE`, …), or ship a non-English UI. Do not invent a catalog on every new string. If `languages/*.po` already exists and they asked to refresh translations, re-run from `make-pot`.
+
+PO is the **single source of truth** for both PHP and JS. `make-mo` feeds PHP; `make-json` extracts JS strings from the same PO.
+
+### 11.1 Commands
+
+| Command | Role |
+|---------|------|
+| `wp i18n make-pot` | Scan PHP, JS, Blade, `block.json`, `theme.json` → POT (English `msgid`, empty `msgstr`) |
+| `wp i18n update-po` | Merge a POT into existing PO files (like `msgmerge`) |
+| `wp i18n make-mo` | PO → binary MO (PHP runtime). **Required.** Do not hand-edit `.mo` |
+| `wp i18n make-json` | Extract JS strings from a **translated PO** → Jed 1.x JSON (one file per JS source) |
+| `wp i18n make-php` | Optional PO → `.l10n.php` (WP 6.5+). Not a substitute for MO |
+
+### 11.2 File names
+
+| File | Pattern | Who consumes it |
+|------|---------|-----------------|
+| POT | `{domain}.pot` | Extractors / `update-po` |
+| PO | `{domain}-{locale}.po` (plugin); theme copies often `{locale}.po` | Humans / this agent |
+| MO | Plugin: `{domain}-{locale}.mo`. Theme dir: `{locale}.mo` | PHP (`load_*_textdomain`) |
+| JSON | `{domain}-{locale}-{md5}.json` or `{domain}-{locale}-{handle}.json` | JS (`wp_set_script_translations`) |
+| PHP (optional) | `{domain}-{locale}.l10n.php` | PHP 6.5+ loader |
+
+### 11.3 Agent steps
+
+1. Resolve **slug = text domain** and the **target locale**. Ask once if the locale is missing.
+2. Ensure `languages/` exists and the header has `Domain Path: /languages`.
+3. From the plugin/theme root:
+
+   ```bash
+   wp i18n make-pot . languages/my-plugin.pot --domain=my-plugin
+   ```
+
+4. Create or update the PO:
+   - **New locale:** copy the POT to `languages/my-plugin-fa_IR.po`. Set header `Language: fa_IR` and a correct `Plural-Forms` for that locale (e.g. `fa_IR`: `nplurals=2; plural=(n > 1);` — `de_DE`: `nplurals=2; plural=(n != 1);`).
+   - **Existing PO files:**
+
+     ```bash
+     wp i18n update-po languages/my-plugin.pot languages
+     ```
+
+5. **Fill `msgstr`.** Translate every empty or `fuzzy` entry into the target language. Leave `msgid` in English. Do not write that language back into PHP/JS. Do not invent extra `msgid`s.
+6. Build PHP catalogs:
+
+   ```bash
+   wp i18n make-mo languages
+   ```
+
+7. If the PO has `#:` references to `.js` / `.jsx` / `.ts` / `.tsx` (or you registered a JS handle):
+
+   ```bash
+   wp i18n make-json languages --no-purge
+   ```
+
+   `--no-purge` keeps JS strings in the PO so later `update-po` still works. Add `--use-map` when the built file path differs from the source path recorded in the PO.
+8. Optional only: `wp i18n make-php languages`. House default is still MO.
+9. Wire loaders (§3): `load_plugin_textdomain` / `load_theme_textdomain` on `init`; `wp_set_script_translations` when JS exists.
+
+Commit `.pot` and `.po` when the project tracks them. Commit generated `.mo` / `.json` when the project ships catalogs (off-directory plugins always should).
+
+### 11.4 Flow
+
 ```
-
-Do not hand-edit `.mo` files. Commit `.pot` when the project tracks it.
+PHP + JS English gettext
+        │
+        ▼
+wp i18n make-pot . languages/{domain}.pot
+        │
+        ▼
+copy POT → {domain}-{locale}.po   or   wp i18n update-po
+        │
+        ▼
+agent fills msgstr (target language; msgid stays English)
+        │
+        ├─ PHP ─► wp i18n make-mo languages
+        │         load_plugin_textdomain / load_theme_textdomain
+        │
+        └─ JS ──► wp i18n make-json languages --no-purge
+                  wp_set_script_translations( $handle, $domain, $path )
+```
 
 ---
 
@@ -380,5 +533,14 @@ Do not hand-edit `.mo` files. Commit `.pot` when the project tracks it.
 - https://developer.wordpress.org/apis/internationalization/internationalization-guidelines/
 - https://developer.wordpress.org/plugins/internationalization/how-to-internationalize-your-plugin/
 - https://developer.wordpress.org/themes/functionality/internationalization/
+- https://developer.wordpress.org/cli/commands/i18n/
+- https://developer.wordpress.org/cli/commands/i18n/make-pot/
+- https://developer.wordpress.org/cli/commands/i18n/update-po/
+- https://developer.wordpress.org/cli/commands/i18n/make-mo/
+- https://developer.wordpress.org/cli/commands/i18n/make-json/
+- https://developer.wordpress.org/reference/functions/load_plugin_textdomain/
+- https://developer.wordpress.org/reference/functions/load_theme_textdomain/
+- https://developer.wordpress.org/reference/functions/wp_set_script_translations/
+- https://developer.wordpress.org/block-editor/how-to-guides/internationalization/
 - https://developer.wordpress.org/block-editor/reference-guides/packages/packages-i18n/
 - https://make.wordpress.org/polyglots/handbook/plugin-theme-authors-guide/

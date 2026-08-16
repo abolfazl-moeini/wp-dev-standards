@@ -1,0 +1,26 @@
+{
+  "name": "i18n catalog pipeline: POT/PO/MO plus JS JSON",
+  "skills": ["wordpress-router", "wp-dev-standards"],
+  "query": "This plugin is for Iranian sites. The admin UI must appear in Persian. PHP notices use esc_html_e() and a React settings panel already wraps labels with __() from @wordpress/i18n. Add fa_IR translations.",
+  "expected_behavior": [
+    "Step 1: Route via wordpress-router; apply wp-dev-standards for i18n/string rules",
+    "Step 2: Keep every gettext / wp.i18n / @wordpress/i18n source string in English — do not put Persian inside __(), _e(), esc_html_e(), or JS __()",
+    "Step 3: Run wp i18n make-pot from the plugin root into languages/{text-domain}.pot",
+    "Step 4: Create languages/{text-domain}-fa_IR.po (copy from POT) or wp i18n update-po if a PO already exists; set Language: fa_IR and Plural-Forms",
+    "Step 5: Fill msgstr in the PO with Persian; leave msgid in English; do not invent extra msgid entries",
+    "Step 6: Run wp i18n make-mo languages so PHP can load {text-domain}-fa_IR.mo",
+    "Step 7: Because JS strings exist, run wp i18n make-json languages --no-purge (add --use-map if build path differs from source path)",
+    "Step 8: Ensure the script has a wp-i18n dependency and wp_set_script_translations( handle, domain, filesystem languages path ) after register; JS uses __ / _x / _n / _nx / sprintf only (no _e)",
+    "Step 9: Wire load_plugin_textdomain on init (not plugins_loaded); Domain Path /languages"
+  ],
+  "success_criteria": [
+    "No Persian (or other non-English) literals inside gettext or @wordpress/i18n / wp.i18n calls",
+    "languages/{domain}.pot exists and was generated with make-pot",
+    "languages/{domain}-fa_IR.po exists with Language: fa_IR and filled msgstr; msgid remains English",
+    "Matching .mo exists from make-mo (plugin naming {domain}-fa_IR.mo)",
+    "Jed JSON exists for JS sources (make-json --no-purge), named {domain}-fa_IR-{md5}.json or {domain}-fa_IR-{handle}.json",
+    "JS has no _e / _ex i18n helpers",
+    "wp-i18n dependency + wp_set_script_translations after the script is registered",
+    "Target language comes from catalogs, not from PHP/JS source strings"
+  ]
+}
