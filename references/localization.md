@@ -423,7 +423,7 @@ Hardcoding non-English UI **without** gettext is also wrong for shippable plugin
 
 ---
 
-## 10. Failure modes
+## 10. Failure modes & Anti-patterns
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
@@ -432,10 +432,60 @@ Hardcoding non-English UI **without** gettext is also wrong for shippable plugin
 | JS still English | No JSON, wrong handle/path, missing `wp-i18n` dep | `make-json --no-purge` + `wp_set_script_translations` after register |
 | `make-json` empty / wrong file | Source path ≠ runtime path | `--use-map`; check `#:` refs in the PO |
 | Theme MO not loaded | Named `{domain}-{locale}.mo` in the theme dir | Rename to `{locale}.mo` |
-| JIT notice / too early | `load_*_textdomain` on `plugins_loaded` | Hook `init` or later |
+| JIT notice / `_load_textdomain_just_in_time` | Calling `__()` / `_e()` or loading textdomain before `init` | Defer gettext until `did_action('init')`; hook `load_plugin_textdomain` on `init` priority 0 |
+| Stale untranslated strings after `init` | Defaults cached/memoized during `plugins_loaded` or boot | Cache only after `init` (`did_action('init')`) and flush cache on `init` |
 | Strings never appear in `.pot` | Variable domain or dynamic string build | Literal domain + static English templates |
 | Broken word order in locale | Concatenated fragments | One sentence + numbered placeholders |
 | Security flag on `_e` | Unescaped HTML output | `esc_html_e` / `esc_attr_e` |
+
+### 10.1 Deep Dive: Preventing `_load_textdomain_just_in_time` Notices (WP 6.7+)
+
+In WordPress 6.7+, translation loading was reworked into a Just-In-Time (JIT) architecture. If code triggers translation lookups for a textdomain before WordPress reaches the `init` action hook:
+1. `_load_textdomain_just_in_time( $domain )` fails normalization and fires a `_doing_it_wrong` Notice.
+2. The domain is marked loaded early, preventing proper locale catalog resolution.
+
+#### Key Anti-Patterns to Avoid:
+1. **Calling `__()` in default array values or option schema generators executed on `plugins_loaded`**:
+   ```php
+   // ANTI-PATTERN: Called during plugin/module registration
+   public static function default_options(): array {
+       return array(
+           'status' => __( 'In progress', 'my-plugin' ), // JIT NOTICE TRIGGER!
+       );
+   }
+
+   // CLEAN PATTERN: Guard gettext with did_action('init')
+   public static function default_options(): array {
+       return array(
+           'status' => did_action( 'init' ) ? __( 'In progress', 'my-plugin' ) : 'In progress',
+       );
+   }
+   ```
+
+2. **Memoizing/caching untranslated defaults before `init`**:
+   If a helper computes and caches defaults statically during `plugins_loaded` (e.g. for database migration or enum definition), the English string is cached in memory. Subsequent calls *after* `init` will return the cached English string instead of the translated locale string.
+   **Solution**:
+   - Only cache into `static $cache` when `did_action('init')` is truthy.
+   - Hook a cache-flushing callback on `init` (e.g. `add_action( 'init', [MyOptions::class, 'flush_cache'], 1 );`).
+
+3. **Passing translated strings into settings link helpers on `plugins_loaded`**:
+   ```php
+   // ANTI-PATTERN:
+   add_action( 'plugins_loaded', function() {
+       wpdev_register_plugin_settings_link( __FILE__, $url, __( 'Settings', 'my-plugin' ) );
+   } );
+
+   // CLEAN PATTERN: Omit 3rd argument; framework translates on plugins.php after init:
+   add_action( 'plugins_loaded', function() {
+       wpdev_register_plugin_settings_link( __FILE__, $url );
+   } );
+   ```
+
+4. **Hooking `load_plugin_textdomain()` to `plugins_loaded`**:
+   Hook `load_plugin_textdomain()` to `init` with priority `0`. Do NOT hook `plugins_loaded`.
+
+5. **Static property initializations or class constructors executed at file load time**:
+   Never run `__()` at the file top-level or in static property initializers. Initialize lazily inside methods called after `init`.
 
 ---
 

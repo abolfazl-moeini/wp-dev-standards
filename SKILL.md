@@ -151,6 +151,34 @@ add_action( 'init', function () {
 - Plugin `languages/`: `{text-domain}-{locale}.mo` (e.g. `my-plugin-fa_IR.mo`). Theme `languages/`: `{locale}.mo` (e.g. `fa_IR.mo`). Global `wp-content/languages/{plugins,themes}/` uses `{text-domain}-{locale}.mo`.
 - wordpress.org language packs take priority since WP 4.6+; still declare domain/path correctly. Off-directory or custom `.mo` still needs `load_*_textdomain` (or a `load_textdomain_mofile` filter).
 
+### 1.4.1 Anti-Patterns: Early Translation & `_load_textdomain_just_in_time`
+
+WordPress 6.7+ triggers `Notice: Function _load_textdomain_just_in_time was called incorrectly. Translation loading for the <domain> domain was triggered too early` whenever `__()`, `_e()`, `_x()`, `esc_*`, etc. are executed **before the `init` action**.
+
+| Anti-Pattern (WRONG) | Why it breaks | Recommended Pattern (CORRECT) |
+|---|---|---|
+| Calling `__()` in default arrays/options before `init` (e.g. during `plugins_loaded`, database setup, or enum registration). | Fires before `init` → triggers `_load_textdomain_just_in_time` JIT notice. | Guard with `did_action('init')`: `did_action('init') ? __('Label', 'slug') : 'Label'`. |
+| Memoizing/caching untranslated defaults before `init`. | Statically cached before `init` → requests after `init` permanently receive untranslated English strings. | Only write to cache if `did_action('init')` is true, and flush the cache on `init` priority 0/1. |
+| Passing translated label to `wpdev_register_plugin_settings_link()` on `plugins_loaded`. | `plugins_loaded` runs before `init` → early domain load. | Leave label empty: `wpdev_register_plugin_settings_link( $file, $url )`. The framework translates it on `plugins.php` after `init`. |
+| Hooking `load_plugin_textdomain()` to `plugins_loaded` or at file root. | Violates WP 6.7+ JIT lifecycle. | Hook `load_plugin_textdomain()` to `init` at priority `0`. |
+| Class properties initialized with gettext expressions at class load. | Executes at PHP parse/require time before WP boots. | Initialize inside a method called on/after `init` or compute lazily. |
+
+```php
+// WRONG: Called during plugins_loaded / module boot
+public static function default_statuses(): array {
+    return [
+        ['slug' => 'in_progress', 'label' => __( 'In progress', 'my-plugin' )],
+    ];
+}
+
+// CORRECT: Defers gettext until init has fired
+public static function default_statuses(): array {
+    return [
+        ['slug' => 'in_progress', 'label' => did_action( 'init' ) ? __( 'In progress', 'my-plugin' ) : 'In progress'],
+    ];
+}
+```
+
 ### 1.5 Checklist (before merge)
 
 - [ ] **Every gettext string is English**
