@@ -237,6 +237,87 @@ Optional: `wp i18n make-php languages` (`.l10n.php`, WP 6.5+). House default rem
 
 ---
 
+## 4) Admin UI Verification & Session Testing Anti-Patterns
+
+When verifying WordPress admin screens, list tables, or settings pages, agents and developers frequently get trapped in unnecessary debugging loops by mixing CLI and Web execution contexts.
+
+### 4.1 Anti-Patterns & Pitfalls
+
+| Anti-Pattern (WRONG) | Why it breaks / Failure mode | Recommended Pattern (CORRECT) |
+|---|---|---|
+| **Simulating UI render in CLI (`wp eval` calling `$page->output()`, `new AdminPage()`, or `WP_List_Table` render methods).** | Admin UI in WordPress is tightly coupled to the full browser request lifecycle (`admin_init`, `$current_screen`, `admin_header`, template container wrappers, screen options, table filters). Invoking render methods inside `wp eval` produces synthetic false-positive fatal errors (`Call to a member function get_filters() on null`, `Call to undefined function wpdev_wrap_use_container()`, etc.) that do **not** exist in the real web runtime. The developer wastes time chasing CLI phantom bugs. | **Use direct HTTP requests against the web server (`curl` or Playwright).** Verify HTTP status code (200 OK, 302 redirect), check response headers, and inspect returned HTML markup for expected containers, tables, and asset script tags. Use `wp eval` / WP-CLI strictly for backend business logic, database queries, WooCommerce CRUD, and headless service calls. |
+| **Mismatched host/scheme when generating auth cookies for curl testing.** | WordPress hashes auth cookies (`LOGGED_IN_COOKIE`, `SECURE_AUTH_COOKIE`) with `COOKIEHASH`, which is derived from `siteurl`. In CLI context without explicit URL params, `siteurl` or `HTTP_HOST` often defaults to `http://localhost` instead of `https://multisite.local` (or whatever the real web server runs). Cookies generated this way fail signature verification, causing WordPress to treat the request as an unauthenticated guest and returning HTTP 403 ("Sorry, you are not allowed to access this page") or a redirect loop to `wp-login.php`. | **Match the URL and scheme explicitly when generating test cookies**, or authenticate via a standard login POST with a cookie-jar: `curl -k -c /tmp/cookies.txt -d "log=admin&pwd=password&wp-submit=Log+In" https://domain.local/wp-login.php`, then `curl -k -b /tmp/cookies.txt https://domain.local/wp-admin/...`. |
+| **Testing UI state through synthetic global overrides instead of real request parameters.** | Manually monkey-patching `$_GET`, `$_POST`, or globals in `wp eval` misses hooks that run during early request initialization (`plugins_loaded`, `setup_theme`, `init`, `admin_menu`). | Test actual URLs with query parameters via HTTP requests (e.g. `curl -k -s -I "https://domain.local/wp-admin/admin.php?page=my-page&view=detail"`). |
+
+### 4.2 Standard Recipe: Verifying an Admin Screen Locally
+
+```bash
+# 1. Log in and save cookies to a clean jar
+curl -k -c /tmp/wp_admin_cookies.txt -X POST "https://domain.local/wp-login.php" \
+  -d "log=admin" \
+  -d "pwd=admin_password" \
+  -d "wp-submit=Log+In" \
+  -d "redirect_to=https%3A%2F%2Fdomain.local%2Fwp-admin%2F"
+
+# 2. Check the admin screen via HTTP HEAD/GET
+curl -k -s -I -b /tmp/wp_admin_cookies.txt \
+  "https://domain.local/wp-admin/admin.php?page=my-plugin-page"
+# Expected: HTTP/2 200 (or 302 redirect to canonical view)
+
+# 3. Check for specific page markup/scripts
+curl -k -s -L -b /tmp/wp_admin_cookies.txt \
+  "https://domain.local/wp-admin/admin.php?page=my-plugin-page" \
+  | grep -E "(my-plugin-table|my-plugin-bundle\.js)"
+```
+
+---
+
+## 5) Cross-Platform Filesystem & Case-Sensitivity Standards
+
+### 5.1 macOS APFS vs Linux ext4 Case-Sensitivity (CRITICAL)
+
+> **macOS default filesystems (APFS / HFS+) are case-insensitive, whereas production Linux filesystems (ext4, XFS) are strictly case-sensitive.**
+
+- On macOS, `require_once 'Access/Exceptions/class-access-denied-exception.php'` succeeds even if the directory on disk is named `access/exceptions/` or the file is named `Class-Access-Denied-Exception.php`.
+- On Linux production servers, PHP emits a fatal error: `Uncaught Error: Failed opening required ...` or `Class 'WPDev\Access\Exceptions\Access_Denied_Exception' not found`.
+- **Hard House Rule:** All file paths, directory paths, namespace segments, and class names must match disk casing character-for-character across all `require`, `include`, and Composer PSR-4 autoload rules.
+- **Verification Rule:** Passing unit tests or smoke tests on a macOS host does **not** prove filesystem safety. Always verify packaging and bootstraps in a Linux container (e.g. Docker `docker compose exec nikamooz ...` or CI/CD Linux runner) before releasing.
+
+---
+
+## 6) WordPress Plugin Load Order & Embedded Library Isolation
+
+### 6.1 Alphabetical Plugin Load Order (`active_plugins`)
+In WordPress core, active plugins are loaded strictly alphabetically by directory/file slug in `get_option('active_plugins')`. For example, `norvan-lucky-spinner/norvan-lucky-spinner.php` will always load **before** `wpdev/wpdev.php` (`n` < `w`).
+
+### 6.2 Dual-Boot & Embedded Framework Self-Containment
+When a plugin embeds an external framework (e.g. `WPDev` under `includes/framework/` in `WPDEV_LIBRARY_MODE`) as a fallback for standalone mode:
+1. **Never assume sibling plugins have loaded:** If the consumer plugin's slug is alphabetically earlier than the framework plugin, the embedded framework boots first.
+2. **100% Self-Contained Release Tree:** The embedded framework in `includes/framework/` must contain all required runtime sub-packages (e.g. `dependencies/wpdev-access-manager`).
+3. **No Dependency on Stripped Directories:** Release packaging tools strip `packages/`, `tests/`, and dev tools. Any runtime code that must survive release packaging must live in `dependencies/`, not `packages/`.
+4. **Defensive Fallbacks:** Framework classes that extend package classes should provide a fallback base class (e.g. extending `\RuntimeException` if a package class is missing) to prevent fatal crashes if a dependency is omitted.
+
+---
+
+## 7) Solar (Jalali/Shamsi) Date Handling & Anti-Patterns
+
+### 7.1 Anti-Pattern: Blind Calendar Conversion (Runaway Date Inflation)
+
+> **Never assume user-submitted or HTTP form dates are unconditionally in the Shamsi (Jalali) calendar.**
+
+- **The Flaw:** Blindly passing incoming dates (e.g. `$_POST['order_date']`) to `Jalalian::fromFormat()` or `gregdate()` without inspecting the 4-digit year.
+- **The Runaway Inflation Loop:** If an admin, browser autofill, REST API, or mobile app sends a Gregorian date (e.g. `2026-09-16`):
+  - **Pass 1:** Gregorian year `2026` is parsed as Jalali year `2026` and converted to Gregorian year `2647` (+621 years).
+  - **Pass 2:** On subsequent view or save, year `2647` is re-parsed as Jalali and converted to Gregorian year `3269`!
+  - **Result:** Severe data corruption with orders, coupons, or posts landing in years 3000+.
+- **Hard House Rules:**
+  1. **Pre-Validate Input Year:** Always extract the 4-digit year. If `year >= 1900`, the date is ALREADY Gregorian — do NOT pass it through Jalali-to-Gregorian converters (`Jalalian::fromFormat`, `gregdate`).
+  2. **Bounded Shamsi Range:** Only parse dates as Jalali if `1300 <= year < 1900`.
+  3. **Defensive Storage Bounds (OrderDateGuard):** Always guard database insert hooks (`wp_insert_post_data` or `woocommerce_process_shop_order_meta`) with a sanity range check (e.g. `2010 <= year <= 2050`). If an impossible future year is detected, recover the true date from payment metadata (`_date_paid`, `_paid_date`) or `post_modified`.
+  4. **Avoid Double Timezone Offsetting:** When calling WooCommerce `$order->set_date_created()`, pass formatted local date strings without timezone (e.g. `"Y-m-d H:i:s"`) or UTC integer timestamps directly. Do not mix `gmdate()` output with unzoned date setters.
+
+---
+
 ## Procedure (agent)
 
 1. Resolve text domain from plugin/theme header (or ask once). Domain must equal slug.
@@ -267,6 +348,8 @@ Optional: `wp i18n make-php languages` (`.l10n.php`, WP 6.5+). House default rem
 | Broken word order after translate | Concatenated fragments | One English sentence + numbered placeholders |
 | Agent/client breaks on errors | Translated error **code** | Literal code + translated message |
 | Strings missing from `.pot` | Variable domain or dynamic template | Literal domain + static English templates |
+| `Class not found` on Linux production / works on Mac | Case-mismatch in namespace, class, or file path masked by macOS APFS | Ensure exact case match across all files and namespaces (§5.1) and verify in Docker/Linux |
+| Post/Order date corrupted to year 2600–3200+ | Blind Jalali conversion of a Gregorian input date (§7.1) | Check `year >= 1900` before parsing; add `OrderDateGuard` sanity check |
 
 ## Escalation
 
